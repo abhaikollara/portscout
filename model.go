@@ -534,7 +534,9 @@ func (m *model) rebuildGroupedTable() {
 		}
 	}
 	m.table.SetRows(rows)
-	if m.table.Cursor() >= len(rows) && len(rows) > 0 {
+	if len(rows) == 0 {
+		m.table.SetCursor(0)
+	} else if m.table.Cursor() >= len(rows) {
 		m.table.SetCursor(len(rows) - 1)
 	}
 }
@@ -552,7 +554,9 @@ func (m *model) rebuildTable() {
 		}
 	}
 	m.table.SetRows(rows)
-	if m.table.Cursor() >= len(rows) && len(rows) > 0 {
+	if len(rows) == 0 {
+		m.table.SetCursor(0)
+	} else if m.table.Cursor() >= len(rows) {
 		m.table.SetCursor(len(rows) - 1)
 	}
 }
@@ -618,8 +622,9 @@ func (m model) renderDetail() string {
 	if maxCmd < 20 {
 		maxCmd = 20
 	}
-	if len(cmdline) > maxCmd {
-		cmdline = cmdline[:maxCmd-3] + "..."
+	runes := []rune(cmdline)
+	if len(runes) > maxCmd {
+		cmdline = string(runes[:maxCmd-3]) + "..."
 	}
 
 	createTime := "N/A"

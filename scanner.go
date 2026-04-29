@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/shirou/gopsutil/v3/net"
 	"github.com/shirou/gopsutil/v3/process"
@@ -58,13 +60,17 @@ func ScanConnections() ([]Connection, error) {
 		name := resolveProcessName(c.Pid)
 
 		proto := "TCP"
-		if c.Type == 2 { // syscall.SOCK_DGRAM
+		if c.Type == syscall.SOCK_DGRAM {
 			proto = "UDP"
 		}
 
 		var remote string
 		if c.Raddr.IP != "" {
-			remote = fmt.Sprintf("%s:%d", c.Raddr.IP, c.Raddr.Port)
+			if strings.Contains(c.Raddr.IP, ":") {
+				remote = fmt.Sprintf("[%s]:%d", c.Raddr.IP, c.Raddr.Port)
+			} else {
+				remote = fmt.Sprintf("%s:%d", c.Raddr.IP, c.Raddr.Port)
+			}
 		}
 
 		dk := dedupKey{c.Laddr.Port, c.Pid, c.Status, remote}
@@ -122,7 +128,7 @@ func GetProcessDetail(pid int32) (ProcessDetail, error) {
 	if user, err := p.Username(); err == nil {
 		d.User = user
 	}
-	if cpu, err := p.CPUPercent(); err == nil {
+	if cpu, err := p.Percent(200 * time.Millisecond); err == nil {
 		d.CPUPercent = cpu
 	}
 	if mem, err := p.MemoryPercent(); err == nil {
@@ -144,6 +150,10 @@ func GetProcessDetail(pid int32) (ProcessDetail, error) {
 	return d, nil
 }
 
+// resolveProcessName returns the cached process name or fetches it.
+// Note: there is a benign TOCTOU race between the cache check and write —
+// two goroutines may both resolve the same PID, but the mutex serializes
+// the map writes so no corruption occurs.
 func resolveProcessName(pid int32) string {
 	nameCacheMu.Lock()
 	if name, ok := nameCache[pid]; ok {

@@ -14,6 +14,7 @@ import (
 )
 
 var columnNames = []string{"Port", "Process", "PID", "Proto", "Status", "Remote"}
+var groupedColumnNames = []string{"PID", "Process", "Conns", "Ports", "Statuses"}
 
 type tickMsg time.Time
 type scanResultMsg []Connection
@@ -40,6 +41,9 @@ type model struct {
 	sortCol int
 	sortAsc bool
 	frozen  bool
+	grouped bool
+
+	groups []processGroup // populated when grouped=true
 
 	width  int
 	height int
@@ -134,9 +138,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case scanResultMsg:
 		m.connections = []Connection(msg)
-		m.applyFilter()
-		m.sortConnections()
-		m.rebuildTable()
+		m.refreshView()
 		return m, nil
 
 	case killResultMsg:
@@ -184,9 +186,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "esc":
 			m.filter = ""
 			m.filterActive = false
-			m.applyFilter()
-			m.sortConnections()
-			m.rebuildTable()
+			m.refreshView()
 			return m, nil
 		case "enter":
 			m.filterActive = false
@@ -194,17 +194,13 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "backspace":
 			if len(m.filter) > 0 {
 				m.filter = m.filter[:len(m.filter)-1]
-				m.applyFilter()
-				m.sortConnections()
-				m.rebuildTable()
+				m.refreshView()
 			}
 			return m, nil
 		default:
 			if len(msg.String()) == 1 {
 				m.filter += msg.String()
-				m.applyFilter()
-				m.sortConnections()
-				m.rebuildTable()
+				m.refreshView()
 			}
 			return m, nil
 		}
@@ -217,38 +213,54 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "esc":
 		if m.filter != "" {
 			m.filter = ""
-			m.applyFilter()
-			m.sortConnections()
-			m.rebuildTable()
+			m.refreshView()
 		}
 		return m, nil
 	case "/":
 		m.filterActive = true
 		return m, nil
 	case "k":
-		if len(m.filtered) > 0 {
-			cursor := m.table.Cursor()
-			if cursor >= 0 && cursor < len(m.filtered) {
-				target := m.filtered[cursor]
-				m.killTarget = &target
+		cursor := m.table.Cursor()
+		if m.grouped {
+			if cursor >= 0 && cursor < len(m.groups) {
+				g := m.groups[cursor]
+				m.killTarget = &Connection{PID: g.PID, Process: g.Process}
 				m.confirmKill = true
 			}
+		} else if cursor >= 0 && cursor < len(m.filtered) {
+			target := m.filtered[cursor]
+			m.killTarget = &target
+			m.confirmKill = true
 		}
 		return m, nil
 	case "s":
-		m.sortCol = (m.sortCol + 1) % len(columnNames)
-		m.sortConnections()
-		m.rebuildTable()
-		m.resizeColumns()
+		if !m.grouped {
+			m.sortCol = (m.sortCol + 1) % len(columnNames)
+			m.sortConnections()
+			m.rebuildTable()
+			m.resizeColumns()
+		}
 		return m, nil
 	case "S":
-		m.sortAsc = !m.sortAsc
-		m.sortConnections()
-		m.rebuildTable()
-		m.resizeColumns()
+		if !m.grouped {
+			m.sortAsc = !m.sortAsc
+			m.sortConnections()
+			m.rebuildTable()
+			m.resizeColumns()
+		}
 		return m, nil
 	case "f":
 		m.frozen = !m.frozen
+		return m, nil
+	case "g":
+		m.grouped = !m.grouped
+		m.resizeColumns()
+		if m.grouped {
+			m.buildGroups()
+			m.rebuildGroupedTable()
+		} else {
+			m.rebuildTable()
+		}
 		return m, nil
 	}
 
@@ -256,6 +268,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.table, cmd = m.table.Update(msg)
 	return m, cmd
+}
+
+func (m *model) refreshView() {
+	m.applyFilter()
+	m.sortConnections()
+	m.resizeColumns()
+	if m.grouped {
+		m.buildGroups()
+		m.rebuildGroupedTable()
+	} else {
+		m.rebuildTable()
+	}
 }
 
 func (m *model) applyFilter() {
@@ -279,6 +303,42 @@ func (m *model) applyFilter() {
 
 func (m *model) resizeColumns() {
 	if m.width <= 0 {
+		return
+	}
+
+	// Clear rows when column count changes to prevent index-out-of-range
+	// panics in the table's internal renderRow.
+	currentColCount := len(m.table.Columns())
+	targetColCount := len(columnNames)
+	if m.grouped {
+		targetColCount = len(groupedColumnNames)
+	}
+	if currentColCount != targetColCount {
+		m.table.SetRows([]table.Row{})
+	}
+
+	if m.grouped {
+		names := groupedColumnNames
+		titles := make([]string, len(names))
+		copy(titles, names)
+
+		// Grouped: PID(8), Process(flex), Conns(6), Ports(flex), Statuses(18)
+		// padding = 2 * 5 cols = 10
+		fixed := 8 + 6 + 18 + 10
+		remaining := m.width - fixed
+		if remaining < 20 {
+			remaining = 20
+		}
+		processWidth := remaining * 40 / 100
+		portsWidth := remaining - processWidth
+
+		m.table.SetColumns([]table.Column{
+			{Title: titles[0], Width: 8},
+			{Title: titles[1], Width: processWidth},
+			{Title: titles[2], Width: 6},
+			{Title: titles[3], Width: portsWidth},
+			{Title: titles[4], Width: 18},
+		})
 		return
 	}
 
@@ -339,6 +399,89 @@ func (m *model) sortConnections() {
 		}
 		return less
 	})
+}
+
+type processGroup struct {
+	PID      int32
+	Process  string
+	Count    int
+	Ports    string
+	Statuses string
+}
+
+func (m *model) buildGroups() {
+	type pidData struct {
+		process  string
+		ports    []string
+		statuses map[string]bool
+		count    int
+	}
+
+	order := []int32{}
+	byPID := make(map[int32]*pidData)
+
+	for _, c := range m.filtered {
+		d, ok := byPID[c.PID]
+		if !ok {
+			d = &pidData{
+				process:  c.Process,
+				statuses: make(map[string]bool),
+			}
+			byPID[c.PID] = d
+			order = append(order, c.PID)
+		}
+		d.count++
+		d.ports = append(d.ports, fmt.Sprintf("%d", c.LocalPort))
+		d.statuses[c.Status] = true
+	}
+
+	m.groups = make([]processGroup, 0, len(order))
+	for _, pid := range order {
+		d := byPID[pid]
+
+		// Deduplicate and truncate ports
+		portStr := strings.Join(d.ports, ",")
+		if len(portStr) > 30 {
+			portStr = portStr[:27] + "..."
+		}
+
+		// Collect unique statuses
+		ss := make([]string, 0, len(d.statuses))
+		for s := range d.statuses {
+			ss = append(ss, s)
+		}
+		sort.Strings(ss)
+
+		m.groups = append(m.groups, processGroup{
+			PID:      pid,
+			Process:  d.process,
+			Count:    d.count,
+			Ports:    portStr,
+			Statuses: strings.Join(ss, ","),
+		})
+	}
+
+	// Sort grouped view by connection count descending by default
+	sort.SliceStable(m.groups, func(i, j int) bool {
+		return m.groups[i].Count > m.groups[j].Count
+	})
+}
+
+func (m *model) rebuildGroupedTable() {
+	rows := make([]table.Row, len(m.groups))
+	for i, g := range m.groups {
+		rows[i] = table.Row{
+			fmt.Sprintf("%d", g.PID),
+			g.Process,
+			fmt.Sprintf("%d", g.Count),
+			g.Ports,
+			g.Statuses,
+		}
+	}
+	m.table.SetRows(rows)
+	if m.table.Cursor() >= len(rows) && len(rows) > 0 {
+		m.table.SetCursor(len(rows) - 1)
+	}
 }
 
 func statusSymbol(status string) string {
@@ -406,7 +549,11 @@ func (m model) View() string {
 		if m.frozen {
 			freezeLabel = "[f] Unfreeze"
 		}
-		footer = footerStyle.Width(m.width).Render("[q] Quit  [k] Kill  [/] Search  [s] Sort  [S] Reverse  " + freezeLabel + "  [esc] Clear Filter")
+		groupLabel := "[g] Group"
+		if m.grouped {
+			groupLabel = "[g] Ungroup"
+		}
+		footer = footerStyle.Width(m.width).Render("[q] Quit  [k] Kill  [/] Search  [s] Sort  [S] Reverse  " + freezeLabel + "  " + groupLabel + "  [esc] Clear")
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, tableView, footer)

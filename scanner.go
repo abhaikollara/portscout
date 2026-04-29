@@ -40,6 +40,14 @@ func ScanConnections() ([]Connection, error) {
 	}
 	nameCacheMu.Unlock()
 
+	type dedupKey struct {
+		port   uint32
+		pid    int32
+		status string
+		remote string
+	}
+	seen := make(map[dedupKey]bool)
+
 	var result []Connection
 	for _, c := range conns {
 		if c.Pid == 0 {
@@ -57,6 +65,12 @@ func ScanConnections() ([]Connection, error) {
 		if c.Raddr.IP != "" {
 			remote = fmt.Sprintf("%s:%d", c.Raddr.IP, c.Raddr.Port)
 		}
+
+		dk := dedupKey{c.Laddr.Port, c.Pid, c.Status, remote}
+		if seen[dk] {
+			continue
+		}
+		seen[dk] = true
 
 		result = append(result, Connection{
 			LocalPort:  c.Laddr.Port,

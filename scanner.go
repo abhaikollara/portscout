@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"sort"
 	"sync"
 
@@ -10,10 +11,12 @@ import (
 
 // Connection represents a single network connection with its associated process.
 type Connection struct {
-	LocalPort uint32
-	PID       int32
-	Process   string
-	Status    string
+	LocalPort  uint32
+	PID        int32
+	Process    string
+	Status     string
+	Protocol   string
+	RemoteAddr string
 }
 
 var (
@@ -44,11 +47,24 @@ func ScanConnections() ([]Connection, error) {
 		}
 
 		name := resolveProcessName(c.Pid)
+
+		proto := "TCP"
+		if c.Type == 2 { // syscall.SOCK_DGRAM
+			proto = "UDP"
+		}
+
+		var remote string
+		if c.Raddr.IP != "" {
+			remote = fmt.Sprintf("%s:%d", c.Raddr.IP, c.Raddr.Port)
+		}
+
 		result = append(result, Connection{
-			LocalPort: c.Laddr.Port,
-			PID:       c.Pid,
-			Process:   name,
-			Status:    c.Status,
+			LocalPort:  c.Laddr.Port,
+			PID:        c.Pid,
+			Process:    name,
+			Status:     c.Status,
+			Protocol:   proto,
+			RemoteAddr: remote,
 		})
 	}
 

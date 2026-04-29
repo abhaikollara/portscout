@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,6 +12,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/shirou/gopsutil/v3/process"
 )
+
+var columnNames = []string{"Port", "Process", "PID", "Proto", "Status", "Remote"}
 
 type tickMsg time.Time
 type scanResultMsg []Connection
@@ -34,6 +37,9 @@ type model struct {
 	confirmKill bool
 	killTarget  *Connection
 
+	sortCol int
+	sortAsc bool
+
 	width  int
 	height int
 }
@@ -43,7 +49,9 @@ func newModel() model {
 		{Title: "Port", Width: 8},
 		{Title: "Process", Width: 20},
 		{Title: "PID", Width: 8},
-		{Title: "Status", Width: 14},
+		{Title: "Proto", Width: 5},
+		{Title: "Status", Width: 16},
+		{Title: "Remote", Width: 20},
 	}
 
 	km := table.DefaultKeyMap()
@@ -63,7 +71,9 @@ func newModel() model {
 	)
 
 	return model{
-		table: t,
+		table:   t,
+		sortCol: 0,
+		sortAsc: true,
 	}
 }
 
@@ -105,7 +115,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.table.SetWidth(msg.Width)
-		m.table.SetHeight(msg.Height - 4) // header + footer
+		m.table.SetHeight(msg.Height - 2) // header + footer
+		m.resizeColumns()
 		return m, nil
 
 	case tickMsg:
@@ -120,6 +131,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case scanResultMsg:
 		m.connections = []Connection(msg)
 		m.applyFilter()
+		m.sortConnections()
 		m.rebuildTable()
 		return m, nil
 
@@ -169,6 +181,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.filter = ""
 			m.filterActive = false
 			m.applyFilter()
+			m.sortConnections()
 			m.rebuildTable()
 			return m, nil
 		case "enter":
@@ -178,6 +191,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(m.filter) > 0 {
 				m.filter = m.filter[:len(m.filter)-1]
 				m.applyFilter()
+				m.sortConnections()
 				m.rebuildTable()
 			}
 			return m, nil
@@ -185,6 +199,7 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if len(msg.String()) == 1 {
 				m.filter += msg.String()
 				m.applyFilter()
+				m.sortConnections()
 				m.rebuildTable()
 			}
 			return m, nil
@@ -195,6 +210,14 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		return m, tea.Quit
+	case "esc":
+		if m.filter != "" {
+			m.filter = ""
+			m.applyFilter()
+			m.sortConnections()
+			m.rebuildTable()
+		}
+		return m, nil
 	case "/":
 		m.filterActive = true
 		return m, nil
@@ -207,6 +230,18 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.confirmKill = true
 			}
 		}
+		return m, nil
+	case "s":
+		m.sortCol = (m.sortCol + 1) % len(columnNames)
+		m.sortConnections()
+		m.rebuildTable()
+		m.resizeColumns()
+		return m, nil
+	case "S":
+		m.sortAsc = !m.sortAsc
+		m.sortConnections()
+		m.rebuildTable()
+		m.resizeColumns()
 		return m, nil
 	}
 
@@ -225,11 +260,93 @@ func (m *model) applyFilter() {
 	var result []Connection
 	for _, c := range m.connections {
 		portStr := fmt.Sprintf("%d", c.LocalPort)
-		if strings.Contains(portStr, f) || strings.Contains(strings.ToLower(c.Process), f) {
+		if strings.Contains(portStr, f) ||
+			strings.Contains(strings.ToLower(c.Process), f) ||
+			strings.Contains(strings.ToLower(c.Protocol), f) ||
+			strings.Contains(strings.ToLower(c.RemoteAddr), f) {
 			result = append(result, c)
 		}
 	}
 	m.filtered = result
+}
+
+func (m *model) resizeColumns() {
+	if m.width <= 0 {
+		return
+	}
+
+	// Build titles with sort indicator
+	titles := make([]string, len(columnNames))
+	for i, name := range columnNames {
+		if i == m.sortCol {
+			arrow := "▲"
+			if !m.sortAsc {
+				arrow = "▼"
+			}
+			titles[i] = name + " " + arrow
+		} else {
+			titles[i] = name
+		}
+	}
+
+	// Fixed columns: Port(8), PID(8), Proto(5), Status(16), padding(12 = 2*6 cols)
+	// Process and Remote split the remaining width (60/40)
+	fixed := 8 + 8 + 5 + 16 + 12
+	remaining := m.width - fixed
+	if remaining < 20 {
+		remaining = 20
+	}
+	processWidth := remaining * 60 / 100
+	remoteWidth := remaining - processWidth
+
+	m.table.SetColumns([]table.Column{
+		{Title: titles[0], Width: 8},
+		{Title: titles[1], Width: processWidth},
+		{Title: titles[2], Width: 8},
+		{Title: titles[3], Width: 5},
+		{Title: titles[4], Width: 16},
+		{Title: titles[5], Width: remoteWidth},
+	})
+}
+
+func (m *model) sortConnections() {
+	sort.SliceStable(m.filtered, func(i, j int) bool {
+		var less bool
+		a, b := m.filtered[i], m.filtered[j]
+		switch m.sortCol {
+		case 0: // Port
+			less = a.LocalPort < b.LocalPort
+		case 1: // Process
+			less = strings.ToLower(a.Process) < strings.ToLower(b.Process)
+		case 2: // PID
+			less = a.PID < b.PID
+		case 3: // Proto
+			less = a.Protocol < b.Protocol
+		case 4: // Status
+			less = a.Status < b.Status
+		case 5: // Remote
+			less = a.RemoteAddr < b.RemoteAddr
+		}
+		if !m.sortAsc {
+			return !less
+		}
+		return less
+	})
+}
+
+func statusSymbol(status string) string {
+	switch status {
+	case "LISTEN":
+		return "◉ LISTEN"
+	case "ESTABLISHED":
+		return "⬤ ESTABLISHED"
+	case "CLOSE_WAIT":
+		return "◌ CLOSE_WAIT"
+	case "TIME_WAIT":
+		return "○ TIME_WAIT"
+	default:
+		return "· " + status
+	}
 }
 
 func (m *model) rebuildTable() {
@@ -239,11 +356,12 @@ func (m *model) rebuildTable() {
 			fmt.Sprintf("%d", c.LocalPort),
 			c.Process,
 			fmt.Sprintf("%d", c.PID),
-			c.Status,
+			c.Protocol,
+			statusSymbol(c.Status),
+			c.RemoteAddr,
 		}
 	}
 	m.table.SetRows(rows)
-	// Clamp cursor
 	if m.table.Cursor() >= len(rows) && len(rows) > 0 {
 		m.table.SetCursor(len(rows) - 1)
 	}
@@ -277,7 +395,7 @@ func (m model) View() string {
 			footer = statusSuccessStyle.Width(m.width).Render(m.statusMsg)
 		}
 	} else {
-		footer = footerStyle.Width(m.width).Render("[q] Quit  [k] Kill  [/] Search  [esc] Clear Filter")
+		footer = footerStyle.Width(m.width).Render("[q] Quit  [k] Kill  [/] Search  [s] Sort  [S] Reverse  [esc] Clear Filter")
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, tableView, footer)

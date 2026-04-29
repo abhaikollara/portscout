@@ -39,6 +39,7 @@ type model struct {
 
 	sortCol int
 	sortAsc bool
+	frozen  bool
 
 	width  int
 	height int
@@ -125,6 +126,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.statusTicks == 0 {
 				m.statusMsg = ""
 			}
+		}
+		if m.frozen {
+			return m, tickCmd()
 		}
 		return m, tea.Batch(scanCmd(), tickCmd())
 
@@ -242,6 +246,9 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.sortConnections()
 		m.rebuildTable()
 		m.resizeColumns()
+		return m, nil
+	case "f":
+		m.frozen = !m.frozen
 		return m, nil
 	}
 
@@ -395,7 +402,11 @@ func (m model) View() string {
 			footer = statusSuccessStyle.Width(m.width).Render(m.statusMsg)
 		}
 	} else {
-		footer = footerStyle.Width(m.width).Render("[q] Quit  [k] Kill  [/] Search  [s] Sort  [S] Reverse  [esc] Clear Filter")
+		freezeLabel := "[f] Freeze"
+		if m.frozen {
+			freezeLabel = "[f] Unfreeze"
+		}
+		footer = footerStyle.Width(m.width).Render("[q] Quit  [k] Kill  [/] Search  [s] Sort  [S] Reverse  " + freezeLabel + "  [esc] Clear Filter")
 	}
 
 	return lipgloss.JoinVertical(lipgloss.Left, header, tableView, footer)

@@ -28,7 +28,10 @@ make install
 ## Usage
 
 ```
-portscout
+portscout            # Launch the interactive TUI
+portscout 8080       # Show process details for port 8080
+portscout -k 8080    # Kill the process on port 8080
+portscout --version  # Print version
 ```
 
 > **Note:** Some connections require elevated permissions to resolve process names. Run with `sudo` if you see `unknown` processes.

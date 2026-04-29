@@ -1,4 +1,4 @@
-module code.abhai.dev/portwatch
+module code.abhai.dev/portscout
 
 go 1.26.1
 

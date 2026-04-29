@@ -22,6 +22,10 @@ type killResultMsg struct {
 	pid int32
 	err error
 }
+type detailResultMsg struct {
+	detail ProcessDetail
+	err    error
+}
 
 type model struct {
 	table       table.Model
@@ -30,6 +34,7 @@ type model struct {
 
 	filter       string
 	filterActive bool
+	filterPID    int32 // when set, only show this PID (from group drill-down)
 
 	statusMsg   string
 	statusError bool
@@ -44,6 +49,9 @@ type model struct {
 	grouped bool
 
 	groups []processGroup // populated when grouped=true
+
+	showDetail bool
+	detail     *ProcessDetail
 
 	width  int
 	height int
@@ -102,6 +110,13 @@ func tickCmd() tea.Cmd {
 	})
 }
 
+func fetchDetailCmd(pid int32) tea.Cmd {
+	return func() tea.Msg {
+		d, err := GetProcessDetail(pid)
+		return detailResultMsg{detail: d, err: err}
+	}
+}
+
 func killCmd(pid int32) tea.Cmd {
 	return func() tea.Msg {
 		p, err := process.NewProcess(pid)
@@ -141,6 +156,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.refreshView()
 		return m, nil
 
+	case detailResultMsg:
+		if msg.err == nil {
+			m.detail = &msg.detail
+			m.showDetail = true
+		}
+		return m, nil
+
 	case killResultMsg:
 		if msg.err != nil {
 			m.statusMsg = fmt.Sprintf("Failed to kill PID %d: %v", msg.pid, msg.err)
@@ -162,6 +184,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Detail view mode — any key closes it
+	if m.showDetail {
+		m.showDetail = false
+		m.detail = nil
+		return m, nil
+	}
+
 	// Kill confirmation mode
 	if m.confirmKill {
 		switch msg.String() {
@@ -211,13 +240,33 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 	case "esc":
-		if m.filter != "" {
+		if m.filter != "" || m.filterPID > 0 {
 			m.filter = ""
+			m.filterPID = 0
 			m.refreshView()
 		}
 		return m, nil
 	case "/":
 		m.filterActive = true
+		return m, nil
+	case "enter":
+		cursor := m.table.Cursor()
+		if m.grouped {
+			if cursor >= 0 && cursor < len(m.groups) {
+				g := m.groups[cursor]
+				m.grouped = false
+				m.filterPID = g.PID
+				m.refreshView()
+			}
+			return m, nil
+		}
+		var pid int32
+		if cursor >= 0 && cursor < len(m.filtered) {
+			pid = m.filtered[cursor].PID
+		}
+		if pid > 0 {
+			return m, fetchDetailCmd(pid)
+		}
 		return m, nil
 	case "k":
 		cursor := m.table.Cursor()
@@ -283,20 +332,26 @@ func (m *model) refreshView() {
 }
 
 func (m *model) applyFilter() {
-	if m.filter == "" {
+	if m.filter == "" && m.filterPID == 0 {
 		m.filtered = m.connections
 		return
 	}
 	f := strings.ToLower(m.filter)
 	var result []Connection
 	for _, c := range m.connections {
-		portStr := fmt.Sprintf("%d", c.LocalPort)
-		if strings.Contains(portStr, f) ||
-			strings.Contains(strings.ToLower(c.Process), f) ||
-			strings.Contains(strings.ToLower(c.Protocol), f) ||
-			strings.Contains(strings.ToLower(c.RemoteAddr), f) {
-			result = append(result, c)
+		if m.filterPID > 0 && c.PID != m.filterPID {
+			continue
 		}
+		if f != "" {
+			portStr := fmt.Sprintf("%d", c.LocalPort)
+			if !strings.Contains(portStr, f) &&
+				!strings.Contains(strings.ToLower(c.Process), f) &&
+				!strings.Contains(strings.ToLower(c.Protocol), f) &&
+				!strings.Contains(strings.ToLower(c.RemoteAddr), f) {
+				continue
+			}
+		}
+		result = append(result, c)
 	}
 	m.filtered = result
 }
@@ -484,21 +539,6 @@ func (m *model) rebuildGroupedTable() {
 	}
 }
 
-func statusSymbol(status string) string {
-	switch status {
-	case "LISTEN":
-		return "◉ LISTEN"
-	case "ESTABLISHED":
-		return "⬤ ESTABLISHED"
-	case "CLOSE_WAIT":
-		return "◌ CLOSE_WAIT"
-	case "TIME_WAIT":
-		return "○ TIME_WAIT"
-	default:
-		return "· " + status
-	}
-}
-
 func (m *model) rebuildTable() {
 	rows := make([]table.Row, len(m.filtered))
 	for i, c := range m.filtered {
@@ -507,7 +547,7 @@ func (m *model) rebuildTable() {
 			c.Process,
 			fmt.Sprintf("%d", c.PID),
 			c.Protocol,
-			statusSymbol(c.Status),
+			c.Status,
 			c.RemoteAddr,
 		}
 	}
@@ -520,6 +560,9 @@ func (m *model) rebuildTable() {
 func (m model) View() string {
 	// Header
 	title := "PortScout"
+	if m.filterPID > 0 {
+		title += fmt.Sprintf("  PID: %d", m.filterPID)
+	}
 	if m.filter != "" || m.filterActive {
 		cursor := ""
 		if m.filterActive {
@@ -556,5 +599,54 @@ func (m model) View() string {
 		footer = footerStyle.Width(m.width).Render("[q] Quit  [k] Kill  [/] Search  [s] Sort  [S] Reverse  " + freezeLabel + "  " + groupLabel + "  [esc] Clear")
 	}
 
+	if m.showDetail && m.detail != nil {
+		return m.renderDetail()
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left, header, tableView, footer)
+}
+
+func (m model) renderDetail() string {
+	d := m.detail
+
+	row := func(label, value string) string {
+		return detailLabelStyle.Render(fmt.Sprintf("%-14s", label)) + " " + detailValueStyle.Render(value)
+	}
+
+	cmdline := d.Cmdline
+	maxCmd := m.width - 24
+	if maxCmd < 20 {
+		maxCmd = 20
+	}
+	if len(cmdline) > maxCmd {
+		cmdline = cmdline[:maxCmd-3] + "..."
+	}
+
+	createTime := "N/A"
+	if d.CreateTime > 0 {
+		t := time.UnixMilli(d.CreateTime)
+		createTime = t.Format("2006-01-02 15:04:05")
+	}
+
+	lines := []string{
+		detailLabelStyle.Render("Process Detail"),
+		"",
+		row("PID:", fmt.Sprintf("%d", d.PID)),
+		row("Name:", d.Name),
+		row("User:", d.User),
+		row("Status:", d.Status),
+		row("CPU %:", fmt.Sprintf("%.1f%%", d.CPUPercent)),
+		row("Memory %:", fmt.Sprintf("%.1f%%", d.MemPercent)),
+		row("File Desc.:", fmt.Sprintf("%d", d.NumFDs)),
+		row("Started:", createTime),
+		row("Working Dir:", d.Cwd),
+		row("Command:", cmdline),
+		"",
+		footerStyle.Render("Press any key to close"),
+	}
+
+	content := strings.Join(lines, "\n")
+	box := detailBoxStyle.Width(m.width - 6).Render(content)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }

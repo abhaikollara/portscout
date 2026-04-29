@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 
 	"github.com/shirou/gopsutil/v3/net"
@@ -87,6 +88,60 @@ func ScanConnections() ([]Connection, error) {
 	})
 
 	return result, nil
+}
+
+// ProcessDetail holds extended info about a process.
+type ProcessDetail struct {
+	PID        int32
+	Name       string
+	Cmdline    string
+	User       string
+	CPUPercent float64
+	MemPercent float32
+	Status     string
+	CreateTime int64
+	NumFDs     int32
+	Cwd        string
+}
+
+// GetProcessDetail fetches extended information for a given PID.
+func GetProcessDetail(pid int32) (ProcessDetail, error) {
+	p, err := process.NewProcess(pid)
+	if err != nil {
+		return ProcessDetail{}, err
+	}
+
+	d := ProcessDetail{PID: pid}
+
+	if name, err := p.Name(); err == nil {
+		d.Name = name
+	}
+	if cmd, err := p.Cmdline(); err == nil {
+		d.Cmdline = cmd
+	}
+	if user, err := p.Username(); err == nil {
+		d.User = user
+	}
+	if cpu, err := p.CPUPercent(); err == nil {
+		d.CPUPercent = cpu
+	}
+	if mem, err := p.MemoryPercent(); err == nil {
+		d.MemPercent = mem
+	}
+	if statuses, err := p.Status(); err == nil {
+		d.Status = strings.Join(statuses, ",")
+	}
+	if ct, err := p.CreateTime(); err == nil {
+		d.CreateTime = ct
+	}
+	if fds, err := p.NumFDs(); err == nil {
+		d.NumFDs = fds
+	}
+	if cwd, err := p.Cwd(); err == nil {
+		d.Cwd = cwd
+	}
+
+	return d, nil
 }
 
 func resolveProcessName(pid int32) string {

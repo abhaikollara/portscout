@@ -74,6 +74,10 @@ portscout --version  # Print version
 - [bubbles](https://github.com/charmbracelet/bubbles) -- Table component
 - [gopsutil](https://github.com/shirou/gopsutil) -- Cross-platform process and network data
 
+## Built with Claude
+
+This project was built entirely using [Claude Code](https://claude.ai/code).
+
 ## License
 
 MIT
